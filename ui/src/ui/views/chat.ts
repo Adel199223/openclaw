@@ -13,6 +13,7 @@ import type { SessionsListResult } from "../types.ts";
 import type { ChatItem, MessageGroup } from "../types/chat-types.ts";
 import type { ChatAttachment, ChatQueueItem } from "../ui-types.ts";
 import { renderMarkdownSidebar } from "./markdown-sidebar.ts";
+import "../components/control-ui-selector.ts";
 import "../components/resizable-divider.ts";
 
 export type CompactionIndicatorStatus = {
@@ -32,6 +33,7 @@ export type FallbackIndicatorStatus = {
 };
 
 export type ChatProps = {
+  basePath: string;
   sessionKey: string;
   onSessionKeyChange: (next: string) => void;
   thinkingLevel: string | null;
@@ -459,6 +461,13 @@ export function renderChat(props: ChatProps) {
             ></textarea>
           </label>
           <div class="chat-compose__actions">
+            <openclaw-control-ui-selector
+              .basePath=${props.basePath}
+              .sessionKey=${props.sessionKey}
+              .draftText=${props.draft}
+              .hasAttachments=${hasAttachments}
+              .gatewayConnected=${props.connected}
+            ></openclaw-control-ui-selector>
             <button
               class="btn"
               ?disabled=${!props.connected || (!canAbort && props.sending)}

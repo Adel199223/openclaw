@@ -1,9 +1,15 @@
 import fs from "node:fs/promises";
-import type { IncomingMessage } from "node:http";
+import { createServer, type IncomingMessage, type Server } from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { Readable } from "node:stream";
 import { describe, expect, it } from "vitest";
-import { CONTROL_UI_BOOTSTRAP_CONFIG_PATH } from "./control-ui-contract.js";
+import {
+  CONTROL_UI_BOOTSTRAP_CONFIG_PATH,
+  CONTROL_UI_SELECTOR_HEALTH_PATH,
+  CONTROL_UI_SELECTOR_SELECT_PATH,
+  CONTROL_UI_SELECTOR_STATE_PATH,
+} from "./control-ui-contract.js";
 import { handleControlUiAvatarRequest, handleControlUiHttpRequest } from "./control-ui.js";
 import { makeMockHttpResponse } from "./test-http-response.js";
 
@@ -40,20 +46,42 @@ describe("handleControlUiHttpRequest", () => {
     expect(params.end).toHaveBeenCalledWith("Not Found");
   }
 
-  function runControlUiRequest(params: {
+  function createMockRequest(params: {
+    url: string;
+    method: "GET" | "HEAD" | "POST";
+    body?: string;
+    headers?: Record<string, string>;
+  }) {
+    const stream = Readable.from(params.body ? [params.body] : []) as IncomingMessage;
+    stream.url = params.url;
+    stream.method = params.method;
+    stream.headers = params.headers ?? {};
+    return stream;
+  }
+
+  async function runControlUiRequest(params: {
     url: string;
     method: "GET" | "HEAD" | "POST";
     rootPath: string;
     basePath?: string;
     rootKind?: "resolved" | "bundled";
+    body?: string;
+    headers?: Record<string, string>;
+    selectorProxyOrigin?: string;
   }) {
     const { res, end } = makeMockHttpResponse();
-    const handled = handleControlUiHttpRequest(
-      { url: params.url, method: params.method } as IncomingMessage,
+    const handled = await handleControlUiHttpRequest(
+      createMockRequest({
+        url: params.url,
+        method: params.method,
+        body: params.body,
+        headers: params.headers,
+      }),
       res,
       {
         ...(params.basePath ? { basePath: params.basePath } : {}),
         root: { kind: params.rootKind ?? "resolved", path: params.rootPath },
+        ...(params.selectorProxyOrigin ? { selectorProxyOrigin: params.selectorProxyOrigin } : {}),
       },
     );
     return { res, end, handled };
@@ -102,11 +130,44 @@ describe("handleControlUiHttpRequest", () => {
     }
   }
 
+  async function withSelectorProxyOrigin<T>(params: {
+    onRequest: (request: IncomingMessage, body: string) => { status?: number; body: unknown };
+    fn: (origin: string) => Promise<T>;
+  }) {
+    const server = await new Promise<Server>((resolve) => {
+      const httpServer = createServer((request, response) => {
+        let body = "";
+        request.setEncoding("utf8");
+        request.on("data", (chunk) => {
+          body += chunk;
+        });
+        request.on("end", () => {
+          const result = params.onRequest(request, body);
+          response.statusCode = result.status ?? 200;
+          response.setHeader("Content-Type", "application/json; charset=utf-8");
+          response.end(JSON.stringify(result.body));
+        });
+      });
+      httpServer.listen(0, "127.0.0.1", () => resolve(httpServer));
+    });
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        throw new Error("Unexpected selector proxy test server address");
+      }
+      return await params.fn(`http://127.0.0.1:${address.port}`);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      });
+    }
+  }
+
   it("sets security headers for Control UI responses", async () => {
     await withControlUiRoot({
       fn: async (tmp) => {
         const { res, setHeader } = makeMockHttpResponse();
-        const handled = handleControlUiHttpRequest(
+        const handled = await handleControlUiHttpRequest(
           { url: "/", method: "GET" } as IncomingMessage,
           res,
           {
@@ -130,7 +191,7 @@ describe("handleControlUiHttpRequest", () => {
       indexHtml: html,
       fn: async (tmp) => {
         const { res, end } = makeMockHttpResponse();
-        const handled = handleControlUiHttpRequest(
+        const handled = await handleControlUiHttpRequest(
           { url: "/", method: "GET" } as IncomingMessage,
           res,
           {
@@ -151,7 +212,7 @@ describe("handleControlUiHttpRequest", () => {
     await withControlUiRoot({
       fn: async (tmp) => {
         const { res, end } = makeMockHttpResponse();
-        const handled = handleControlUiHttpRequest(
+        const handled = await handleControlUiHttpRequest(
           { url: CONTROL_UI_BOOTSTRAP_CONFIG_PATH, method: "GET" } as IncomingMessage,
           res,
           {
@@ -176,7 +237,7 @@ describe("handleControlUiHttpRequest", () => {
     await withControlUiRoot({
       fn: async (tmp) => {
         const { res, end } = makeMockHttpResponse();
-        const handled = handleControlUiHttpRequest(
+        const handled = await handleControlUiHttpRequest(
           { url: `/openclaw${CONTROL_UI_BOOTSTRAP_CONFIG_PATH}`, method: "GET" } as IncomingMessage,
           res,
           {
@@ -194,6 +255,122 @@ describe("handleControlUiHttpRequest", () => {
         expect(parsed.assistantName).toBe("Ops");
         expect(parsed.assistantAvatar).toBe("/openclaw/avatar/main");
         expect(parsed.assistantAgentId).toBe("main");
+      },
+    });
+  });
+
+  it("proxies selector health and state through the Control UI gateway handler", async () => {
+    await withControlUiRoot({
+      fn: async (tmp) => {
+        await withSelectorProxyOrigin({
+          onRequest: (request) => {
+            if (request.url === "/health") {
+              return { body: { ok: true, localProviderReady: false } };
+            }
+            if (request.url?.startsWith("/v1/state?")) {
+              return {
+                body: {
+                  selectedMode: "fast",
+                  manualRouteId: "none",
+                  effectiveModelRef: "minimax/MiniMax-M2.5",
+                },
+              };
+            }
+            return { status: 404, body: { error: "unexpected" } };
+          },
+          fn: async (origin) => {
+            const {
+              res: healthRes,
+              end: healthEnd,
+              handled: healthHandled,
+            } = await runControlUiRequest({
+              url: CONTROL_UI_SELECTOR_HEALTH_PATH,
+              method: "GET",
+              rootPath: tmp,
+              selectorProxyOrigin: origin,
+            });
+            expect(healthHandled).toBe(true);
+            expect(healthRes.statusCode).toBe(200);
+            expect(JSON.parse(String(healthEnd.mock.calls[0]?.[0] ?? ""))).toEqual({
+              ok: true,
+              localProviderReady: false,
+            });
+
+            const {
+              res: stateRes,
+              end: stateEnd,
+              handled: stateHandled,
+            } = await runControlUiRequest({
+              url: `${CONTROL_UI_SELECTOR_STATE_PATH}?sessionKey=agent%3Amain%3Amain`,
+              method: "GET",
+              rootPath: tmp,
+              selectorProxyOrigin: origin,
+            });
+            expect(stateHandled).toBe(true);
+            expect(stateRes.statusCode).toBe(200);
+            expect(JSON.parse(String(stateEnd.mock.calls[0]?.[0] ?? ""))).toEqual(
+              expect.objectContaining({
+                selectedMode: "fast",
+                effectiveModelRef: "minimax/MiniMax-M2.5",
+              }),
+            );
+          },
+        });
+      },
+    });
+  });
+
+  it("returns structured 503 JSON when the selector sidecar is unavailable", async () => {
+    await withControlUiRoot({
+      fn: async (tmp) => {
+        const { res, end, handled } = await runControlUiRequest({
+          url: CONTROL_UI_SELECTOR_HEALTH_PATH,
+          method: "GET",
+          rootPath: tmp,
+          selectorProxyOrigin: "http://127.0.0.1:9",
+        });
+        expect(handled).toBe(true);
+        expect(res.statusCode).toBe(503);
+        expect(JSON.parse(String(end.mock.calls[0]?.[0] ?? ""))).toEqual({
+          status: "error",
+          error: "selector_proxy_unavailable",
+          detail: "Selector sidecar unavailable via gateway proxy.",
+        });
+      },
+    });
+  });
+
+  it("proxies selector POST actions without exposing direct localhost browser access", async () => {
+    await withControlUiRoot({
+      fn: async (tmp) => {
+        await withSelectorProxyOrigin({
+          onRequest: (request, body) => {
+            expect(request.method).toBe("POST");
+            expect(request.url).toBe("/v1/select");
+            expect(JSON.parse(body)).toEqual({
+              sessionKey: "agent:main:main",
+              mode: "quality",
+              manualRouteId: "none",
+            });
+            return { body: { ok: true } };
+          },
+          fn: async (origin) => {
+            const { res, handled } = await runControlUiRequest({
+              url: CONTROL_UI_SELECTOR_SELECT_PATH,
+              method: "POST",
+              rootPath: tmp,
+              selectorProxyOrigin: origin,
+              body: JSON.stringify({
+                sessionKey: "agent:main:main",
+                mode: "quality",
+                manualRouteId: "none",
+              }),
+              headers: { "content-type": "application/json" },
+            });
+            expect(handled).toBe(true);
+            expect(res.statusCode).toBe(200);
+          },
+        });
       },
     });
   });
@@ -252,7 +429,7 @@ describe("handleControlUiHttpRequest", () => {
           await fs.symlink(outsideFile, path.join(assetsDir, "leak.txt"));
 
           const { res, end } = makeMockHttpResponse();
-          const handled = handleControlUiHttpRequest(
+          const handled = await handleControlUiHttpRequest(
             { url: "/assets/leak.txt", method: "GET" } as IncomingMessage,
             res,
             {
@@ -273,7 +450,7 @@ describe("handleControlUiHttpRequest", () => {
         const { assetsDir, filePath } = await writeAssetFile(tmp, "actual.txt", "inside-ok\n");
         await fs.symlink(filePath, path.join(assetsDir, "linked.txt"));
 
-        const { res, end, handled } = runControlUiRequest({
+        const { res, end, handled } = await runControlUiRequest({
           url: "/assets/linked.txt",
           method: "GET",
           rootPath: tmp,
@@ -291,7 +468,7 @@ describe("handleControlUiHttpRequest", () => {
       fn: async (tmp) => {
         await writeAssetFile(tmp, "actual.txt", "inside-ok\n");
 
-        const { res, end, handled } = runControlUiRequest({
+        const { res, end, handled } = await runControlUiRequest({
           url: "/assets/actual.txt",
           method: "HEAD",
           rootPath: tmp,
@@ -314,7 +491,7 @@ describe("handleControlUiHttpRequest", () => {
           await fs.rm(path.join(tmp, "index.html"));
           await fs.symlink(outsideIndex, path.join(tmp, "index.html"));
 
-          const { res, end, handled } = runControlUiRequest({
+          const { res, end, handled } = await runControlUiRequest({
             url: "/app/route",
             method: "GET",
             rootPath: tmp,
@@ -337,7 +514,7 @@ describe("handleControlUiHttpRequest", () => {
           await fs.rm(path.join(tmp, "index.html"));
           await fs.link(outsideIndex, path.join(tmp, "index.html"));
 
-          const { res, end, handled } = runControlUiRequest({
+          const { res, end, handled } = await runControlUiRequest({
             url: "/",
             method: "GET",
             rootPath: tmp,
@@ -358,7 +535,7 @@ describe("handleControlUiHttpRequest", () => {
         await fs.writeFile(path.join(assetsDir, "app.js"), "console.log('hi');");
         await fs.link(path.join(assetsDir, "app.js"), path.join(assetsDir, "app.hl.js"));
 
-        const { res, end, handled } = runControlUiRequest({
+        const { res, end, handled } = await runControlUiRequest({
           url: "/assets/app.hl.js",
           method: "GET",
           rootPath: tmp,
@@ -379,7 +556,7 @@ describe("handleControlUiHttpRequest", () => {
         await fs.writeFile(path.join(assetsDir, "app.js"), "console.log('hi');");
         await fs.link(path.join(assetsDir, "app.js"), path.join(assetsDir, "app.hl.js"));
 
-        const { res, end, handled } = runControlUiRequest({
+        const { res, end, handled } = await runControlUiRequest({
           url: "/assets/app.hl.js",
           method: "GET",
           rootPath: tmp,
@@ -398,7 +575,7 @@ describe("handleControlUiHttpRequest", () => {
       fn: async (tmp) => {
         for (const webhookPath of ["/bluebubbles-webhook", "/custom-webhook", "/callback"]) {
           const { res } = makeMockHttpResponse();
-          const handled = handleControlUiHttpRequest(
+          const handled = await handleControlUiHttpRequest(
             { url: webhookPath, method: "POST" } as IncomingMessage,
             res,
             { root: { kind: "resolved", path: tmp } },
@@ -415,7 +592,7 @@ describe("handleControlUiHttpRequest", () => {
     await withControlUiRoot({
       fn: async (tmp) => {
         const { res } = makeMockHttpResponse();
-        const handled = handleControlUiHttpRequest(
+        const handled = await handleControlUiHttpRequest(
           { url: "/bluebubbles-webhook", method: "POST" } as IncomingMessage,
           res,
           { basePath: "/openclaw", root: { kind: "resolved", path: tmp } },
@@ -429,7 +606,7 @@ describe("handleControlUiHttpRequest", () => {
     await withControlUiRoot({
       fn: async (tmp) => {
         for (const apiPath of ["/api", "/api/sessions", "/api/channels/nostr"]) {
-          const { handled } = runControlUiRequest({
+          const { handled } = await runControlUiRequest({
             url: apiPath,
             method: "GET",
             rootPath: tmp,
@@ -444,7 +621,7 @@ describe("handleControlUiHttpRequest", () => {
     await withControlUiRoot({
       fn: async (tmp) => {
         for (const pluginPath of ["/plugins", "/plugins/diffs/view/abc/def"]) {
-          const { handled } = runControlUiRequest({
+          const { handled } = await runControlUiRequest({
             url: pluginPath,
             method: "GET",
             rootPath: tmp,
@@ -458,7 +635,7 @@ describe("handleControlUiHttpRequest", () => {
   it("falls through POST requests when basePath is empty", async () => {
     await withControlUiRoot({
       fn: async (tmp) => {
-        const { handled, end } = runControlUiRequest({
+        const { handled, end } = await runControlUiRequest({
           url: "/webhook/bluebubbles",
           method: "POST",
           rootPath: tmp,
@@ -473,7 +650,7 @@ describe("handleControlUiHttpRequest", () => {
     await withControlUiRoot({
       fn: async (tmp) => {
         for (const route of ["/openclaw", "/openclaw/", "/openclaw/some-page"]) {
-          const { handled, end } = runControlUiRequest({
+          const { handled, end } = await runControlUiRequest({
             url: route,
             method: "POST",
             rootPath: tmp,
@@ -495,7 +672,7 @@ describe("handleControlUiHttpRequest", () => {
 
         const secretPathUrl = secretPath.split(path.sep).join("/");
         const absolutePathUrl = secretPathUrl.startsWith("/") ? secretPathUrl : `/${secretPathUrl}`;
-        const { res, end, handled } = runControlUiRequest({
+        const { res, end, handled } = await runControlUiRequest({
           url: `/openclaw/${absolutePathUrl}`,
           method: "GET",
           rootPath: root,
@@ -524,7 +701,7 @@ describe("handleControlUiHttpRequest", () => {
           throw error;
         }
 
-        const { res, end, handled } = runControlUiRequest({
+        const { res, end, handled } = await runControlUiRequest({
           url: "/openclaw/assets/leak.txt",
           method: "GET",
           rootPath: root,

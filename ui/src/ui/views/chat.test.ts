@@ -15,6 +15,7 @@ function createSessions(): SessionsListResult {
 
 function createProps(overrides: Partial<ChatProps> = {}): ChatProps {
   return {
+    basePath: "",
     sessionKey: "main",
     onSessionKeyChange: () => undefined,
     thinkingLevel: null,
@@ -249,6 +250,14 @@ describe("chat view", () => {
     );
     expect(senderLabels).toContain("Iris");
     expect(senderLabels).not.toContain("You");
+  });
+
+  it("renders the selector control in the compose actions", () => {
+    const container = document.createElement("div");
+    render(renderChat(createProps()), container);
+
+    const selector = container.querySelector("openclaw-control-ui-selector");
+    expect(selector).not.toBeNull();
   });
 
   it("keeps consecutive user messages from different senders in separate groups", () => {

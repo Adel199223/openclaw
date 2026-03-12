@@ -24,6 +24,10 @@ import {
 } from "./control-ui-http-utils.js";
 import { classifyControlUiRequest } from "./control-ui-routing.js";
 import {
+  handleControlUiSelectorProxyRequest,
+  type ControlUiSelectorProxyOptions,
+} from "./control-ui-selector-proxy.js";
+import {
   buildControlUiAvatarUrl,
   CONTROL_UI_AVATAR_PREFIX,
   normalizeControlUiBasePath,
@@ -39,7 +43,7 @@ export type ControlUiRequestOptions = {
   config?: OpenClawConfig;
   agentId?: string;
   root?: ControlUiRootState;
-};
+} & Pick<ControlUiSelectorProxyOptions, "selectorProxyOrigin">;
 
 export type ControlUiRootState =
   | { kind: "bundled"; path: string }
@@ -296,11 +300,11 @@ function isSafeRelativePath(relPath: string) {
   return true;
 }
 
-export function handleControlUiHttpRequest(
+export async function handleControlUiHttpRequest(
   req: IncomingMessage,
   res: ServerResponse,
   opts?: ControlUiRequestOptions,
-): boolean {
+): Promise<boolean> {
   const urlRaw = req.url;
   if (!urlRaw) {
     return false;
@@ -308,6 +312,14 @@ export function handleControlUiHttpRequest(
   const url = new URL(urlRaw, "http://localhost");
   const basePath = normalizeControlUiBasePath(opts?.basePath);
   const pathname = url.pathname;
+  if (
+    await handleControlUiSelectorProxyRequest(req, res, {
+      basePath,
+      selectorProxyOrigin: opts?.selectorProxyOrigin,
+    })
+  ) {
+    return true;
+  }
   const route = classifyControlUiRequest({
     basePath,
     pathname,
