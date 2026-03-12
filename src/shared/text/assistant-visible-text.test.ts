@@ -7,6 +7,11 @@ describe("stripAssistantInternalScaffolding", () => {
     expect(stripAssistantInternalScaffolding(input)).toBe("Visible");
   });
 
+  it("hides leaked reasoning before an orphaned closing tag when a visible answer follows", () => {
+    const input = ["The user wants a short diagnostic reply.", "</think>", "", "OK"].join("\n");
+    expect(stripAssistantInternalScaffolding(input)).toBe("OK");
+  });
+
   it("strips relevant-memories scaffolding blocks", () => {
     const input = [
       "<relevant-memories>",

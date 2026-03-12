@@ -42,6 +42,8 @@ export type GetReplyOptions = {
   heartbeatModelOverride?: string;
   /** Controls bootstrap workspace context injection (default: full). */
   bootstrapContextMode?: "full" | "lightweight";
+  /** Optional explicit single-model fallback override for this run. */
+  fallbackModelRef?: string;
   /** If true, suppress tool error warning payloads for this run. */
   suppressToolErrorWarnings?: boolean;
   onPartialReply?: (payload: ReplyPayload) => Promise<void> | void;

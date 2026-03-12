@@ -139,6 +139,10 @@ export async function runAgentTurnWithFallback(params: {
   let fallbackProvider = params.followupRun.run.provider;
   let fallbackModel = params.followupRun.run.model;
   let fallbackAttempts: RuntimeFallbackAttempt[] = [];
+  const allowLocalContextOverflowFallback =
+    params.followupRun.run.provider === "tabby-local" &&
+    Array.isArray(params.followupRun.run.fallbacksOverride) &&
+    params.followupRun.run.fallbacksOverride.length > 0;
   let didResetAfterCompactionFailure = false;
   let didRetryTransientHttpError = false;
   let bootstrapPromptWarningSignaturesSeen = resolveBootstrapWarningSignaturesSeen(
@@ -202,6 +206,7 @@ export async function runAgentTurnWithFallback(params: {
       const fallbackResult = await runWithModelFallback({
         ...resolveModelFallbackOptions(params.followupRun.run),
         runId,
+        allowContextOverflowFallback: allowLocalContextOverflowFallback,
         run: (provider, model, runOptions) => {
           // Notify that model selection is complete (including after fallback).
           // This allows responsePrefix template interpolation with the actual model.
@@ -345,7 +350,8 @@ export async function runAgentTurnWithFallback(params: {
                 return isMarkdownCapableMessageChannel(channel) ? "markdown" : "plain";
               })(),
               suppressToolErrorWarnings: params.opts?.suppressToolErrorWarnings,
-              bootstrapContextMode: params.opts?.bootstrapContextMode,
+              bootstrapContextMode:
+                params.opts?.bootstrapContextMode ?? params.followupRun.run.bootstrapContextMode,
               bootstrapContextRunKind: params.opts?.isHeartbeat ? "heartbeat" : "default",
               images: params.opts?.images,
               abortSignal: params.opts?.abortSignal,
@@ -466,6 +472,15 @@ export async function runAgentTurnWithFallback(params: {
             bootstrapPromptWarningSignaturesSeen = resolveBootstrapWarningSignaturesSeen(
               result.meta?.systemPromptReport,
             );
+            const embeddedError = result.meta?.error;
+            if (
+              allowLocalContextOverflowFallback &&
+              provider === "tabby-local" &&
+              embeddedError &&
+              isContextOverflowError(embeddedError.message)
+            ) {
+              throw new Error(embeddedError.message);
+            }
             return result;
           })();
         },

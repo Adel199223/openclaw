@@ -124,6 +124,7 @@ function createChatContext(): Pick<
   | "chatRunBuffers"
   | "chatDeltaSentAt"
   | "chatAbortedRuns"
+  | "addChatRun"
   | "removeChatRun"
   | "dedupe"
   | "registerToolEventRecipient"
@@ -137,6 +138,7 @@ function createChatContext(): Pick<
     chatRunBuffers: new Map(),
     chatDeltaSentAt: new Map(),
     chatAbortedRuns: new Map(),
+    addChatRun: vi.fn(),
     removeChatRun: vi.fn(),
     dedupe: new Map(),
     registerToolEventRecipient: vi.fn(),
@@ -282,6 +284,28 @@ describe("chat directive tag stripping for non-streaming final payloads", () => 
 
     const register = context.registerToolEventRecipient as unknown as ReturnType<typeof vi.fn>;
     expect(register).not.toHaveBeenCalled();
+  });
+
+  it("registers selector-started agent runs in the chat run registry", async () => {
+    createTranscriptFixture("openclaw-chat-send-run-map-");
+    mockState.finalText = "ok";
+    mockState.triggerAgentRunStart = true;
+    mockState.agentRunId = "run-selector-1";
+    const respond = vi.fn();
+    const context = createChatContext();
+
+    await runNonStreamingChatSend({
+      context,
+      respond,
+      idempotencyKey: "idem-selector-run-map",
+      expectBroadcast: false,
+    });
+
+    const addChatRun = context.addChatRun as unknown as ReturnType<typeof vi.fn>;
+    expect(addChatRun).toHaveBeenCalledWith("run-selector-1", {
+      sessionKey: "main",
+      clientRunId: "idem-selector-run-map",
+    });
   });
 
   it("chat.inject keeps message defined when directive tag is the only content", async () => {

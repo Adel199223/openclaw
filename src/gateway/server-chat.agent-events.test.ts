@@ -189,6 +189,21 @@ describe("agent event handler", () => {
     nowSpy?.mockRestore();
   });
 
+  it("strips leaked reasoning scaffolding from assistant chat events", () => {
+    const { broadcast, nodeSendToSession, nowSpy } = emitRun1AssistantText(
+      createHarness({ now: 1_050 }),
+      ["Internal reasoning leak", "</think>", "", "OK"].join("\n"),
+    );
+    const chatCalls = chatBroadcastCalls(broadcast);
+    expect(chatCalls).toHaveLength(1);
+    const payload = chatCalls[0]?.[1] as {
+      message?: { content?: Array<{ text?: string }> };
+    };
+    expect(payload.message?.content?.[0]?.text).toBe("OK");
+    expect(sessionChatCalls(nodeSendToSession)).toHaveLength(1);
+    nowSpy?.mockRestore();
+  });
+
   it("does not emit chat delta for NO_REPLY streaming text", () => {
     const { broadcast, nodeSendToSession, nowSpy } = emitRun1AssistantText(
       createHarness({ now: 1_000 }),
@@ -398,6 +413,58 @@ describe("agent event handler", () => {
     expect(flushPayload.message?.content?.[0]?.text).toBe("Before tool call\nAfter tool call");
     expect(finalPayload.state).toBe("final");
     expect(finalPayload.message?.content?.[0]?.text).toBe("Before tool call\nAfter tool call");
+    expect(sessionChatCalls(nodeSendToSession)).toHaveLength(3);
+    nowSpy.mockRestore();
+  });
+
+  it("replaces leaked reasoning buffer with sanitized shorter text when a closing think marker arrives", () => {
+    let now = 10_900;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const { broadcast, nodeSendToSession, chatRunState, handler } = createHarness();
+    chatRunState.registry.add("run-think-collapse", {
+      sessionKey: "session-think-collapse",
+      clientRunId: "client-think-collapse",
+    });
+
+    handler({
+      runId: "run-think-collapse",
+      seq: 1,
+      stream: "assistant",
+      ts: Date.now(),
+      data: {
+        text: "The user wants a short diagnostic reply.",
+        delta: "The user wants a short diagnostic reply.",
+      },
+    });
+
+    now = 11_100;
+    handler({
+      runId: "run-think-collapse",
+      seq: 2,
+      stream: "assistant",
+      ts: Date.now(),
+      data: {
+        text: "The user wants a short diagnostic reply.\n</think>\n\nOK",
+        delta: "\n</think>\n\nOK",
+      },
+    });
+
+    emitLifecycleEnd(handler, "run-think-collapse", 3);
+
+    const chatCalls = chatBroadcastCalls(broadcast);
+    expect(chatCalls).toHaveLength(3);
+    const secondPayload = chatCalls[1]?.[1] as {
+      state?: string;
+      message?: { content?: Array<{ text?: string }> };
+    };
+    const finalPayload = chatCalls[2]?.[1] as {
+      state?: string;
+      message?: { content?: Array<{ text?: string }> };
+    };
+    expect(secondPayload.state).toBe("delta");
+    expect(secondPayload.message?.content?.[0]?.text).toBe("OK");
+    expect(finalPayload.state).toBe("final");
+    expect(finalPayload.message?.content?.[0]?.text).toBe("OK");
     expect(sessionChatCalls(nodeSendToSession)).toHaveLength(3);
     nowSpy.mockRestore();
   });

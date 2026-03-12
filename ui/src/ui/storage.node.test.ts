@@ -169,6 +169,30 @@ describe("loadSettings default gateway URL derivation", () => {
     });
   });
 
+  it("hydrates a same-origin hash token before the first gateway connect", async () => {
+    setTestLocation({
+      protocol: "http:",
+      host: "[::1]:18789",
+      pathname: "/chat",
+    });
+    vi.stubGlobal(
+      "window",
+      {
+        location: {
+          href: "http://[::1]:18789/chat?session=agent:main:main#token=abc123",
+        },
+      } as Window & typeof globalThis,
+    );
+
+    const { loadSettings } = await import("./storage.ts");
+    expect(loadSettings()).toMatchObject({
+      gatewayUrl: "ws://[::1]:18789",
+      token: "abc123",
+      sessionKey: "main",
+    });
+    expect(sessionStorage.getItem("openclaw.control.token.v1:ws://[::1]:18789")).toBe("abc123");
+  });
+
   it("does not reuse a session token for a different gatewayUrl", async () => {
     setTestLocation({
       protocol: "https:",

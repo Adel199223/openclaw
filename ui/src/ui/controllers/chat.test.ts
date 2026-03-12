@@ -1,5 +1,11 @@
-import { describe, expect, it, vi } from "vitest";
-import { handleChatEvent, loadChatHistory, type ChatEventPayload, type ChatState } from "./chat.ts";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  handleChatEvent,
+  loadChatHistory,
+  sendChatMessage,
+  type ChatEventPayload,
+  type ChatState,
+} from "./chat.ts";
 
 function createState(overrides: Partial<ChatState> = {}): ChatState {
   return {
@@ -94,6 +100,37 @@ describe("handleChatEvent", () => {
     expect(state.chatMessages[0]).toEqual(payload.message);
   });
 
+  it("sanitizes leaked reasoning scaffolding from another run final payload", () => {
+    const state = createState({
+      sessionKey: "main",
+      chatRunId: "run-user",
+      chatStream: "Working...",
+      chatStreamStartedAt: 123,
+    });
+    const payload: ChatEventPayload = {
+      runId: "run-announce",
+      sessionKey: "main",
+      state: "final",
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "text",
+            text: "The user only wants OK.\\n</think>\\n\\nOK",
+          },
+        ],
+      },
+    };
+
+    expect(handleChatEvent(state, payload)).toBe(null);
+    expect(state.chatMessages).toEqual([
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "OK" }],
+      },
+    ]);
+  });
+
   it("drops NO_REPLY final payload from another run without clearing active stream", () => {
     const state = createState({
       sessionKey: "main",
@@ -163,6 +200,29 @@ describe("handleChatEvent", () => {
       role: "assistant",
       content: [{ type: "text", text: "Here is my reply" }],
     });
+  });
+
+  it("sanitizes streamed text fallback when final event carries no message", () => {
+    const state = createState({
+      sessionKey: "main",
+      chatRunId: "run-1",
+      chatStream: "The user only wants OK.\\n</think>\\n\\nOK",
+      chatStreamStartedAt: 100,
+    });
+    const payload: ChatEventPayload = {
+      runId: "run-1",
+      sessionKey: "main",
+      state: "final",
+    };
+
+    expect(handleChatEvent(state, payload)).toBe("final");
+    expect(state.chatMessages).toEqual([
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "OK" }],
+        timestamp: expect.any(Number),
+      },
+    ]);
   });
 
   it("does not persist empty or whitespace-only stream on final", () => {
@@ -564,5 +624,46 @@ describe("loadChatHistory", () => {
     expect(state.chatThinkingLevel).toBe("low");
     expect(state.chatLoading).toBe(false);
     expect(state.lastError).toBeNull();
+  });
+});
+
+describe("sendChatMessage", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("routes text-only sends through the selector bridge when available", async () => {
+    const client = {
+      request: vi.fn(),
+    };
+    const selector = {
+      sessionKey: "main",
+      canHandleComposerSend: vi.fn(() => true),
+      sendComposerDraft: vi.fn(async () => "selector-run-1"),
+    };
+    vi.stubGlobal("document", {
+      querySelectorAll: vi.fn(() => [selector]),
+    } as unknown as Document);
+    const state = createState({
+      client: client as unknown as ChatState["client"],
+      connected: true,
+      sessionKey: "main",
+    });
+
+    const runId = await sendChatMessage(state, "hello from selector");
+
+    expect(runId).toBe("selector-run-1");
+    expect(selector.canHandleComposerSend).toHaveBeenCalledWith({ hasAttachments: false });
+    expect(selector.sendComposerDraft).toHaveBeenCalledWith({
+      draftText: "hello from selector",
+      clientRunId: expect.any(String),
+    });
+    expect(client.request).not.toHaveBeenCalled();
+    expect(state.chatMessages).toContainEqual({
+      role: "user",
+      content: [{ type: "text", text: "hello from selector" }],
+      timestamp: expect.any(Number),
+    });
+    expect(state.chatSending).toBe(false);
   });
 });

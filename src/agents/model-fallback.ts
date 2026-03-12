@@ -510,6 +510,8 @@ export async function runWithModelFallback<T>(params: {
   agentDir?: string;
   /** Optional explicit fallbacks list; when provided (even empty), replaces agents.defaults.model.fallbacks. */
   fallbacksOverride?: string[];
+  /** Allows context-overflow errors to continue through the explicit fallback chain. */
+  allowContextOverflowFallback?: boolean;
   run: ModelFallbackRunFn<T>;
   onError?: ModelFallbackErrorHandler;
 }): Promise<ModelFallbackRunResult<T>> {
@@ -703,7 +705,37 @@ export async function runWithModelFallback<T>(params: {
       // that may have a smaller context window and fail worse.
       const errMessage = err instanceof Error ? err.message : String(err);
       if (isLikelyContextOverflowError(errMessage)) {
-        throw err;
+        if (!params.allowContextOverflowFallback) {
+          throw err;
+        }
+        lastError = err;
+        attempts.push({
+          provider: candidate.provider,
+          model: candidate.model,
+          error: "context overflow",
+        });
+        logModelFallbackDecision({
+          decision: "candidate_failed",
+          runId: params.runId,
+          requestedProvider: params.provider,
+          requestedModel: params.model,
+          candidate,
+          attempt: i + 1,
+          total: candidates.length,
+          error: errMessage,
+          nextCandidate: candidates[i + 1],
+          isPrimary,
+          requestedModelMatched: requestedModel,
+          fallbackConfigured: hasFallbackCandidates,
+        });
+        await params.onError?.({
+          provider: candidate.provider,
+          model: candidate.model,
+          error: err,
+          attempt: i + 1,
+          total: candidates.length,
+        });
+        continue;
       }
       const normalized =
         coerceToFailoverError(err, {

@@ -15,6 +15,16 @@ describe("sanitizeUserFacingText", () => {
     expect(sanitizeUserFacingText("Hi <final>there</final>!")).toBe("Hi there!");
   });
 
+  it("strips leaked reasoning before an orphaned closing tag", () => {
+    const input = [
+      "The user is asking for a diagnostic reply with exactly OK.",
+      "</think>",
+      "",
+      "OK",
+    ].join("\n");
+    expect(sanitizeUserFacingText(input)).toBe("OK");
+  });
+
   it.each(["202 results found", "400 days left"])(
     "does not clobber normal numeric prefix: %s",
     (text) => {

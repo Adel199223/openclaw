@@ -82,6 +82,16 @@ describe("agent-runner-utils", () => {
     expect(resolved.fallbacksOverride).toEqual(["fallback-model"]);
   });
 
+  it("prefers explicit per-run fallback overrides over config-derived fallback resolution", () => {
+    hoisted.resolveRunModelFallbacksOverrideMock.mockReturnValue(["fallback-model"]);
+    const run = makeRun({ fallbacksOverride: ["minimax/MiniMax-M2.5"] });
+
+    const resolved = resolveModelFallbackOptions(run);
+
+    expect(hoisted.resolveRunModelFallbacksOverrideMock).not.toHaveBeenCalled();
+    expect(resolved.fallbacksOverride).toEqual(["minimax/MiniMax-M2.5"]);
+  });
+
   it("builds embedded run base params with auth profile and run metadata", () => {
     const run = makeRun({ enforceFinalTag: true });
     const authProfile = resolveProviderScopedAuthProfile({

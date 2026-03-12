@@ -4,6 +4,7 @@ import { isSilentReplyText, SILENT_REPLY_TOKEN } from "../auto-reply/tokens.js";
 import { loadConfig } from "../config/config.js";
 import { type AgentEventPayload, getAgentRunContext } from "../infra/agent-events.js";
 import { resolveHeartbeatVisibility } from "../infra/heartbeat-visibility.js";
+import { stripAssistantInternalScaffolding } from "../shared/text/assistant-visible-text.js";
 import { stripInlineDirectiveTagsForDisplay } from "../utils/directive-tags.js";
 import { loadSessionEntry } from "./session-utils.js";
 import { formatForLog } from "./ws-log.js";
@@ -108,6 +109,11 @@ function appendUniqueSuffix(base: string, suffix: string): string {
   return base + suffix;
 }
 
+function sanitizeAssistantChatText(text: string): string {
+  const withoutDirectives = stripInlineDirectiveTagsForDisplay(text).text;
+  return stripAssistantInternalScaffolding(withoutDirectives);
+}
+
 function resolveMergedAssistantText(params: {
   previousText: string;
   nextText: string;
@@ -120,6 +126,15 @@ function resolveMergedAssistantText(params: {
     }
     if (previousText.startsWith(nextText) && !nextDelta) {
       return previousText;
+    }
+    if (nextText.length < previousText.length) {
+      const mergedWithDelta = nextDelta ? appendUniqueSuffix(previousText, nextDelta) : previousText;
+      if (sanitizeAssistantChatText(mergedWithDelta) === nextText) {
+        return nextText;
+      }
+      if (nextDelta && nextText === nextDelta) {
+        return nextText;
+      }
     }
   }
   if (nextDelta) {
@@ -346,9 +361,8 @@ export function createAgentEventHandler({
     text: string,
     delta?: unknown,
   ) => {
-    const cleanedText = stripInlineDirectiveTagsForDisplay(text).text;
-    const cleanedDelta =
-      typeof delta === "string" ? stripInlineDirectiveTagsForDisplay(delta).text : "";
+    const cleanedText = sanitizeAssistantChatText(text);
+    const cleanedDelta = typeof delta === "string" ? sanitizeAssistantChatText(delta) : "";
     const previousText = chatRunState.buffers.get(clientRunId) ?? "";
     const mergedText = resolveMergedAssistantText({
       previousText,
@@ -396,9 +410,9 @@ export function createAgentEventHandler({
     sourceRunId: string,
     seq: number,
   ) => {
-    const bufferedText = stripInlineDirectiveTagsForDisplay(
+    const bufferedText = sanitizeAssistantChatText(
       chatRunState.buffers.get(clientRunId) ?? "",
-    ).text.trim();
+    ).trim();
     const normalizedHeartbeatText = normalizeHeartbeatChatFinalText({
       runId: clientRunId,
       sourceRunId,
@@ -453,9 +467,9 @@ export function createAgentEventHandler({
     error?: unknown,
     stopReason?: string,
   ) => {
-    const bufferedText = stripInlineDirectiveTagsForDisplay(
+    const bufferedText = sanitizeAssistantChatText(
       chatRunState.buffers.get(clientRunId) ?? "",
-    ).text.trim();
+    ).trim();
     const normalizedHeartbeatText = normalizeHeartbeatChatFinalText({
       runId: clientRunId,
       sourceRunId,

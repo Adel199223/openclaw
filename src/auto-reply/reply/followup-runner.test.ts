@@ -227,6 +227,93 @@ describe("createFollowupRunner bootstrap warning dedupe", () => {
   });
 });
 
+describe("createFollowupRunner Local Qwen fallback", () => {
+  it("uses lightweight bootstrap and records MiniMax fallback after local context overflow", async () => {
+    const storePath = path.join(
+      await fs.mkdtemp(path.join(tmpdir(), "openclaw-followup-local-fallback-")),
+      "sessions.json",
+    );
+    const sessionKey = "main";
+    const sessionEntry: SessionEntry = {
+      sessionId: "session",
+      updatedAt: Date.now(),
+    };
+    const sessionStore: Record<string, SessionEntry> = {
+      [sessionKey]: sessionEntry,
+    };
+    await saveSessionStore(storePath, sessionStore);
+
+    const onBlockReply = vi.fn(async () => {});
+    runEmbeddedPiAgentMock
+      .mockImplementationOnce(async (params: { bootstrapContextMode?: string }) => {
+        expect(params.bootstrapContextMode).toBe("lightweight");
+        return {
+          payloads: [],
+          meta: {
+            error: {
+              message: "Request size exceeds model context window",
+            },
+          },
+        };
+      })
+      .mockResolvedValueOnce({
+        payloads: [{ text: "MiniMax fallback reply" }],
+        meta: {
+          agentMeta: {
+            provider: "minimax",
+            model: "MiniMax-M2.5",
+          },
+        },
+      });
+
+    const runner = createFollowupRunner({
+      opts: { onBlockReply },
+      typing: createMockTypingController(),
+      typingMode: "instant",
+      sessionEntry,
+      sessionStore,
+      sessionKey,
+      storePath,
+      defaultModel: "minimax/MiniMax-M2.5",
+    });
+
+    await runner(
+      createQueuedRun({
+        run: {
+          provider: "tabby-local",
+          model: "qwen3.5:9b-exl3-think",
+          fallbacksOverride: ["minimax/MiniMax-M2.5"],
+          bootstrapContextMode: "lightweight",
+        },
+      }),
+    );
+
+    const embeddedCalls = runEmbeddedPiAgentMock.mock.calls.map(
+      ([params]) => params as { provider?: string; model?: string; bootstrapContextMode?: string },
+    );
+    expect(
+      embeddedCalls.some(
+        (call) =>
+          call.provider === "tabby-local" &&
+          call.model === "qwen3.5:9b-exl3-think" &&
+          call.bootstrapContextMode === "lightweight",
+      ),
+    ).toBe(true);
+    expect(
+      embeddedCalls.some((call) => call.provider === "minimax" && call.model === "MiniMax-M2.5"),
+    ).toBe(true);
+    const persisted = loadSessionStore(storePath, { skipCache: true });
+    expect(persisted[sessionKey]?.fallbackNoticeSelectedModel).toBe(
+      "tabby-local/qwen3.5:9b-exl3-think",
+    );
+    expect(persisted[sessionKey]?.fallbackNoticeActiveModel).toBe("minimax/MiniMax-M2.5");
+    expect(persisted[sessionKey]?.fallbackNoticeReason).toBe("context overflow");
+    expect(onBlockReply).toHaveBeenCalledWith(
+      expect.objectContaining({ text: "MiniMax fallback reply" }),
+    );
+  });
+});
+
 describe("createFollowupRunner messaging tool dedupe", () => {
   function createMessagingDedupeRunner(
     onBlockReply: (payload: unknown) => Promise<void>,

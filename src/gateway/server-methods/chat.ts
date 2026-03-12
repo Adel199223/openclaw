@@ -14,6 +14,7 @@ import { jsonUtf8Bytes } from "../../infra/json-utf8-bytes.js";
 import { normalizeInputProvenance, type InputProvenance } from "../../sessions/input-provenance.js";
 import { resolveSendPolicy } from "../../sessions/send-policy.js";
 import { parseAgentSessionKey } from "../../sessions/session-key-utils.js";
+import { stripAssistantInternalScaffolding } from "../../shared/text/assistant-visible-text.js";
 import {
   stripInlineDirectiveTagsForDisplay,
   stripInlineDirectiveTagsFromMessageForDisplay,
@@ -285,14 +286,29 @@ function truncateChatHistoryText(text: string): { text: string; truncated: boole
   };
 }
 
-function sanitizeChatHistoryContentBlock(block: unknown): { block: unknown; changed: boolean } {
+function sanitizeAssistantDisplayText(text: string): { text: string; changed: boolean } {
+  const stripped = stripInlineDirectiveTagsForDisplay(text);
+  const cleaned = stripAssistantInternalScaffolding(stripped.text);
+  return {
+    text: cleaned,
+    changed: stripped.changed || cleaned !== stripped.text,
+  };
+}
+
+function sanitizeChatHistoryContentBlock(
+  block: unknown,
+  role?: string,
+): { block: unknown; changed: boolean } {
   if (!block || typeof block !== "object") {
     return { block, changed: false };
   }
   const entry = { ...(block as Record<string, unknown>) };
   let changed = false;
   if (typeof entry.text === "string") {
-    const stripped = stripInlineDirectiveTagsForDisplay(entry.text);
+    const stripped =
+      role === "assistant"
+        ? sanitizeAssistantDisplayText(entry.text)
+        : stripInlineDirectiveTagsForDisplay(entry.text);
     const res = truncateChatHistoryText(stripped.text);
     entry.text = res.text;
     changed ||= stripped.changed || res.truncated;
@@ -394,6 +410,7 @@ function sanitizeChatHistoryMessage(message: unknown): { message: unknown; chang
     return { message, changed: false };
   }
   const entry = { ...(message as Record<string, unknown>) };
+  const role = typeof entry.role === "string" ? entry.role : "";
   let changed = false;
 
   if ("details" in entry) {
@@ -435,12 +452,15 @@ function sanitizeChatHistoryMessage(message: unknown): { message: unknown; chang
   }
 
   if (typeof entry.content === "string") {
-    const stripped = stripInlineDirectiveTagsForDisplay(entry.content);
+    const stripped =
+      role === "assistant"
+        ? sanitizeAssistantDisplayText(entry.content)
+        : stripInlineDirectiveTagsForDisplay(entry.content);
     const res = truncateChatHistoryText(stripped.text);
     entry.content = res.text;
     changed ||= stripped.changed || res.truncated;
   } else if (Array.isArray(entry.content)) {
-    const updated = entry.content.map((block) => sanitizeChatHistoryContentBlock(block));
+    const updated = entry.content.map((block) => sanitizeChatHistoryContentBlock(block, role));
     if (updated.some((item) => item.changed)) {
       entry.content = updated.map((item) => item.block);
       changed = true;
@@ -448,7 +468,10 @@ function sanitizeChatHistoryMessage(message: unknown): { message: unknown; chang
   }
 
   if (typeof entry.text === "string") {
-    const stripped = stripInlineDirectiveTagsForDisplay(entry.text);
+    const stripped =
+      role === "assistant"
+        ? sanitizeAssistantDisplayText(entry.text)
+        : stripInlineDirectiveTagsForDisplay(entry.text);
     const res = truncateChatHistoryText(stripped.text);
     entry.text = res.text;
     changed ||= stripped.changed || res.truncated;
@@ -687,7 +710,7 @@ function appendAssistantTranscriptMessage(params: {
 
   return appendInjectedAssistantMessageToTranscript({
     transcriptPath,
-    message: params.message,
+    message: stripAssistantInternalScaffolding(params.message),
     label: params.label,
     idempotencyKey: params.idempotencyKey,
     abortMeta: params.abortMeta,
@@ -1080,6 +1103,8 @@ export const chatHandlers: GatewayRequestHandlers = {
       sessionKey: string;
       message: string;
       thinking?: string;
+      lightContext?: boolean;
+      fallbackModelRef?: string;
       deliver?: boolean;
       attachments?: Array<{
         type?: string;
@@ -1310,8 +1335,17 @@ export const chatHandlers: GatewayRequestHandlers = {
           runId: clientRunId,
           abortSignal: abortController.signal,
           images: parsedImages.length > 0 ? parsedImages : undefined,
+          bootstrapContextMode: p.lightContext === true ? "lightweight" : undefined,
+          fallbackModelRef:
+            typeof p.fallbackModelRef === "string" && p.fallbackModelRef.trim()
+              ? p.fallbackModelRef.trim()
+              : undefined,
           onAgentRunStart: (runId) => {
             agentRunStarted = true;
+            context.addChatRun(runId, {
+              sessionKey,
+              clientRunId,
+            });
             const connId = typeof client?.connId === "string" ? client.connId : undefined;
             const wantsToolEvents = hasGatewayClientCap(
               client?.connect?.caps,

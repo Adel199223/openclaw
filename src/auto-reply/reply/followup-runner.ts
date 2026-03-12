@@ -4,13 +4,15 @@ import { resolveBootstrapWarningSignaturesSeen } from "../../agents/bootstrap-bu
 import { lookupContextTokens } from "../../agents/context.js";
 import { DEFAULT_CONTEXT_TOKENS } from "../../agents/defaults.js";
 import { runWithModelFallback } from "../../agents/model-fallback.js";
+import { isContextOverflowError } from "../../agents/pi-embedded-helpers.js";
 import { runEmbeddedPiAgent } from "../../agents/pi-embedded.js";
-import type { SessionEntry } from "../../config/sessions.js";
+import { updateSessionStoreEntry, type SessionEntry } from "../../config/sessions.js";
 import type { TypingMode } from "../../config/types.js";
 import { logVerbose } from "../../globals.js";
 import { registerAgentRunContext } from "../../infra/agent-events.js";
 import { defaultRuntime } from "../../runtime.js";
 import { isInternalMessageChannel } from "../../utils/message-channel.js";
+import { resolveFallbackTransition } from "../fallback-state.js";
 import { stripHeartbeatToken } from "../heartbeat.js";
 import type { OriginatingChannelType } from "../templating.js";
 import { isSilentReplyText, SILENT_REPLY_TOKEN } from "../tokens.js";
@@ -149,11 +151,23 @@ export function createFollowupRunner(params: {
       let runResult: Awaited<ReturnType<typeof runEmbeddedPiAgent>>;
       let fallbackProvider = queued.run.provider;
       let fallbackModel = queued.run.model;
+      const allowLocalContextOverflowFallback =
+        queued.run.provider === "tabby-local" &&
+        Array.isArray(queued.run.fallbacksOverride) &&
+        queued.run.fallbacksOverride.length > 0;
       const activeSessionEntry =
         (sessionKey ? sessionStore?.[sessionKey] : undefined) ?? sessionEntry;
       let bootstrapPromptWarningSignaturesSeen = resolveBootstrapWarningSignaturesSeen(
         activeSessionEntry?.systemPromptReport,
       );
+      let fallbackAttempts: Array<{
+        provider: string;
+        model: string;
+        error: string;
+        reason?: string;
+        status?: number;
+        code?: string;
+      }> = [];
       try {
         const fallbackResult = await runWithModelFallback({
           cfg: queued.run.config,
@@ -161,11 +175,14 @@ export function createFollowupRunner(params: {
           model: queued.run.model,
           runId,
           agentDir: queued.run.agentDir,
-          fallbacksOverride: resolveRunModelFallbacksOverride({
-            cfg: queued.run.config,
-            agentId: queued.run.agentId,
-            sessionKey: queued.run.sessionKey,
-          }),
+          fallbacksOverride: Array.isArray(queued.run.fallbacksOverride)
+            ? queued.run.fallbacksOverride
+            : resolveRunModelFallbacksOverride({
+                cfg: queued.run.config,
+                agentId: queued.run.agentId,
+                sessionKey: queued.run.sessionKey,
+              }),
+          allowContextOverflowFallback: allowLocalContextOverflowFallback,
           run: async (provider, model, runOptions) => {
             const authProfile = resolveRunAuthProfile(queued.run, provider);
             const result = await runEmbeddedPiAgent({
@@ -211,6 +228,7 @@ export function createFollowupRunner(params: {
               runId,
               allowTransientCooldownProbe: runOptions?.allowTransientCooldownProbe,
               blockReplyBreak: queued.run.blockReplyBreak,
+              bootstrapContextMode: queued.run.bootstrapContextMode,
               bootstrapPromptWarningSignaturesSeen,
               bootstrapPromptWarningSignature:
                 bootstrapPromptWarningSignaturesSeen[
@@ -229,12 +247,31 @@ export function createFollowupRunner(params: {
             bootstrapPromptWarningSignaturesSeen = resolveBootstrapWarningSignaturesSeen(
               result.meta?.systemPromptReport,
             );
+            const embeddedError = result.meta?.error;
+            if (
+              allowLocalContextOverflowFallback &&
+              provider === "tabby-local" &&
+              embeddedError &&
+              isContextOverflowError(embeddedError.message)
+            ) {
+              throw new Error(embeddedError.message);
+            }
             return result;
           },
         });
         runResult = fallbackResult.result;
         fallbackProvider = fallbackResult.provider;
         fallbackModel = fallbackResult.model;
+        fallbackAttempts = Array.isArray(fallbackResult.attempts)
+          ? fallbackResult.attempts.map((attempt) => ({
+              provider: String(attempt.provider ?? ""),
+              model: String(attempt.model ?? ""),
+              error: String(attempt.error ?? ""),
+              reason: attempt.reason ? String(attempt.reason) : undefined,
+              status: typeof attempt.status === "number" ? attempt.status : undefined,
+              code: attempt.code ? String(attempt.code) : undefined,
+            }))
+          : [];
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         defaultRuntime.error?.(`Followup agent failed before reply: ${message}`);
@@ -244,6 +281,43 @@ export function createFollowupRunner(params: {
       const usage = runResult.meta?.agentMeta?.usage;
       const promptTokens = runResult.meta?.agentMeta?.promptTokens;
       const modelUsed = runResult.meta?.agentMeta?.model ?? fallbackModel ?? defaultModel;
+      const providerUsed =
+        runResult.meta?.agentMeta?.provider ?? fallbackProvider ?? queued.run.provider;
+      const selectedProvider = queued.run.provider;
+      const selectedModel = queued.run.model;
+      const fallbackStateEntry =
+        (sessionKey ? sessionStore?.[sessionKey] : undefined) ?? sessionEntry;
+      const fallbackTransition = resolveFallbackTransition({
+        selectedProvider,
+        selectedModel,
+        activeProvider: providerUsed,
+        activeModel: modelUsed,
+        attempts: fallbackAttempts,
+        state: fallbackStateEntry,
+      });
+      if (fallbackTransition.stateChanged) {
+        if (fallbackStateEntry) {
+          fallbackStateEntry.fallbackNoticeSelectedModel =
+            fallbackTransition.nextState.selectedModel;
+          fallbackStateEntry.fallbackNoticeActiveModel = fallbackTransition.nextState.activeModel;
+          fallbackStateEntry.fallbackNoticeReason = fallbackTransition.nextState.reason;
+          fallbackStateEntry.updatedAt = Date.now();
+        }
+        if (sessionKey && fallbackStateEntry && sessionStore) {
+          sessionStore[sessionKey] = fallbackStateEntry;
+        }
+        if (sessionKey && storePath) {
+          await updateSessionStoreEntry({
+            storePath,
+            sessionKey,
+            update: async () => ({
+              fallbackNoticeSelectedModel: fallbackTransition.nextState.selectedModel,
+              fallbackNoticeActiveModel: fallbackTransition.nextState.activeModel,
+              fallbackNoticeReason: fallbackTransition.nextState.reason,
+            }),
+          });
+        }
+      }
       const contextTokensUsed =
         agentCfgContextTokens ??
         lookupContextTokens(modelUsed) ??
@@ -258,7 +332,7 @@ export function createFollowupRunner(params: {
           lastCallUsage: runResult.meta?.agentMeta?.lastCallUsage,
           promptTokens,
           modelUsed,
-          providerUsed: fallbackProvider,
+          providerUsed,
           contextTokensUsed,
           systemPromptReport: runResult.meta?.systemPromptReport,
           logLabel: "followup",

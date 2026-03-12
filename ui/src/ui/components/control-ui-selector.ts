@@ -9,6 +9,7 @@ const MANUAL_ROUTE_NONE = "none";
 const MANUAL_ROUTE_LOCAL_QWEN = "local_qwen35_9b_exl3";
 const MANUAL_ROUTE_GPT54_LOW = "gpt54_low";
 const MANUAL_ROUTE_GPT54_HIGH = "gpt54_high";
+const MINIMAX_FAST_MODEL_REF = "minimax/MiniMax-M2.5";
 
 type SelectorHealth = {
   localProviderReady?: boolean;
@@ -132,7 +133,9 @@ export class ControlUiSelector extends LitElement {
 
   private warningList(): string[] {
     const warnings: string[] = [];
-    const combined = [...(this.health?.warnings ?? []), ...(this.selector?.warnings ?? [])];
+    const combined = this.localFallbackActive()
+      ? [...(this.selector?.warnings ?? []), ...(this.health?.warnings ?? [])]
+      : [...(this.health?.warnings ?? []), ...(this.selector?.warnings ?? [])];
     for (const warning of combined) {
       if (typeof warning !== "string") {
         continue;
@@ -148,6 +151,30 @@ export class ControlUiSelector extends LitElement {
 
   private localProviderReady() {
     return this.health?.localProviderReady !== false;
+  }
+
+  private effectiveModelRef() {
+    return typeof this.selector?.effectiveModelRef === "string"
+      ? this.selector.effectiveModelRef.trim()
+      : "";
+  }
+
+  private hasRawLocalFallbackWarning() {
+    const combined = [...(this.health?.warnings ?? []), ...(this.selector?.warnings ?? [])];
+    return combined.some(
+      (warning) =>
+        typeof warning === "string" &&
+        warning.includes("Local Qwen") &&
+        warning.includes("MiniMax-M2.5"),
+    );
+  }
+
+  private localFallbackActive() {
+    return (
+      this.selector?.manualRouteId === MANUAL_ROUTE_LOCAL_QWEN &&
+      (this.hasRawLocalFallbackWarning() ||
+        (!this.localProviderReady() && this.effectiveModelRef() === MINIMAX_FAST_MODEL_REF))
+    );
   }
 
   private activeManualRouteId() {
@@ -193,10 +220,7 @@ export class ControlUiSelector extends LitElement {
   }
 
   private modelLabel() {
-    const modelRef =
-      typeof this.selector?.effectiveModelRef === "string"
-        ? this.selector.effectiveModelRef.trim()
-        : "";
+    const modelRef = this.effectiveModelRef();
     if (!modelRef) {
       return this.selector ? "Pending" : "Unavailable";
     }
@@ -220,6 +244,9 @@ export class ControlUiSelector extends LitElement {
     }
     if (this.error) {
       return "Retrying";
+    }
+    if (this.localFallbackActive()) {
+      return "MiniMax fallback";
     }
     if (!this.localProviderReady()) {
       return "Local unavailable";
@@ -310,6 +337,38 @@ export class ControlUiSelector extends LitElement {
       localThinkingEnabled: this.selector?.localThinkingEnabled !== false,
       ...overrides,
     };
+  }
+
+  canHandleComposerSend(options?: { hasAttachments?: boolean }) {
+    return this.gatewayConnected && !this.error && options?.hasAttachments !== true;
+  }
+
+  async sendComposerDraft(params: { draftText: string; clientRunId: string }) {
+    const draftText = params.draftText.trim();
+    if (!draftText) {
+      return null;
+    }
+    const manualRouteId =
+      typeof this.selector?.manualRouteId === "string"
+        ? this.selector.manualRouteId
+        : MANUAL_ROUTE_NONE;
+    const selectedMode =
+      typeof this.selector?.selectedMode === "string" ? this.selector.selectedMode : "auto";
+    const payload = this.selectionPayload({
+      mode: selectedMode,
+      manualRouteId,
+      draftText,
+      hasAttachments: false,
+      clientRunId: params.clientRunId,
+    });
+    const response = (await this.fetchJson("/v1/send", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    })) as { send?: { runId?: unknown } } | null;
+    this.error = null;
+    await this.refreshState({ keepExistingState: true });
+    const runId = response?.send?.runId;
+    return typeof runId === "string" && runId.trim() ? runId.trim() : params.clientRunId;
   }
 
   private async postSelection(
@@ -419,10 +478,17 @@ export class ControlUiSelector extends LitElement {
         <div class="openclaw-selector-note openclaw-selector-note--warn">${warning}</div>
       `;
     }
+    if (this.localFallbackActive()) {
+      return html`
+        <div class="openclaw-selector-note openclaw-selector-note--warn">
+          Local Qwen is unavailable. Using MiniMax-M2.5 until the local provider recovers.
+        </div>
+      `;
+    }
     if (!this.localProviderReady()) {
       return html`
         <div class="openclaw-selector-note openclaw-selector-note--warn">
-          Local provider unavailable. Fast, Quality, and manual cloud routes still work.
+          Local provider unavailable. Selecting Local Qwen will use MiniMax-M2.5 until local recovers.
         </div>
       `;
     }
@@ -564,7 +630,7 @@ export class ControlUiSelector extends LitElement {
                     <button
                       type="button"
                       class=${["openclaw-selector-btn", activeManualRoute === MANUAL_ROUTE_LOCAL_QWEN && manualRouteId !== MANUAL_ROUTE_NONE ? "is-active" : ""].filter(Boolean).join(" ")}
-                      ?disabled=${selectorUnavailable || !localProviderReady}
+                      ?disabled=${selectorUnavailable}
                       @click=${() => this.handleSelectManual(MANUAL_ROUTE_LOCAL_QWEN, "Local Qwen")}
                     >
                       Local Qwen
@@ -602,7 +668,7 @@ export class ControlUiSelector extends LitElement {
                     <button
                       type="button"
                       class="openclaw-selector-btn"
-                      ?disabled=${selectorUnavailable || activeManualRoute === MANUAL_ROUTE_NONE || (activeManualRoute === MANUAL_ROUTE_LOCAL_QWEN && !localProviderReady)}
+                      ?disabled=${selectorUnavailable || activeManualRoute === MANUAL_ROUTE_NONE}
                       @click=${() => this.handleRetry("manual")}
                     >
                       Retry Manual

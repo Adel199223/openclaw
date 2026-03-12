@@ -3,6 +3,7 @@ import { extractText } from "../chat/message-extract.ts";
 import type { GatewayBrowserClient } from "../gateway.ts";
 import type { ChatAttachment } from "../ui-types.ts";
 import { generateUUID } from "../uuid.ts";
+import { stripAssistantInternalScaffolding } from "../../../../src/shared/text/assistant-visible-text.js";
 
 const SILENT_REPLY_PATTERN = /^\s*NO_REPLY\s*$/;
 
@@ -49,6 +50,12 @@ export type ChatEventPayload = {
   state: "delta" | "final" | "aborted" | "error";
   message?: unknown;
   errorMessage?: string;
+};
+
+type SelectorComposerBridge = Element & {
+  sessionKey?: string;
+  canHandleComposerSend?: (options?: { hasAttachments?: boolean }) => boolean;
+  sendComposerDraft?: (params: { draftText: string; clientRunId: string }) => Promise<string | null>;
 };
 
 function maybeResetToolStream(state: ChatState) {
@@ -149,6 +156,50 @@ function normalizeFinalAssistantMessage(message: unknown): Record<string, unknow
   });
 }
 
+function sanitizeAssistantMessageForDisplay(message: Record<string, unknown>): Record<string, unknown> {
+  const next = { ...message };
+  if (typeof next.text === "string") {
+    next.text = stripAssistantInternalScaffolding(next.text);
+  }
+  if (Array.isArray(next.content)) {
+    next.content = next.content.map((item) => {
+      if (!item || typeof item !== "object") {
+        return item;
+      }
+      const block = item as Record<string, unknown>;
+      if (typeof block.text !== "string") {
+        return item;
+      }
+      return {
+        ...block,
+        text: stripAssistantInternalScaffolding(block.text),
+      };
+    });
+  }
+  return next;
+}
+
+function sanitizeAssistantStreamForDisplay(text: string): string {
+  return stripAssistantInternalScaffolding(text);
+}
+
+function resolveSelectorComposerBridge(state: Pick<ChatState, "sessionKey">): SelectorComposerBridge | null {
+  if (typeof document === "undefined") {
+    return null;
+  }
+  const candidates = Array.from(document.querySelectorAll("openclaw-control-ui-selector"));
+  for (const candidate of candidates) {
+    const selector = candidate as SelectorComposerBridge;
+    const selectorSessionKey =
+      typeof selector.sessionKey === "string" ? selector.sessionKey.trim() : "";
+    if (selectorSessionKey && selectorSessionKey !== state.sessionKey) {
+      continue;
+    }
+    return selector;
+  }
+  return null;
+}
+
 export async function sendChatMessage(
   state: ChatState,
   message: string,
@@ -214,6 +265,20 @@ export async function sendChatMessage(
     : undefined;
 
   try {
+    const selectorBridge = !hasAttachments ? resolveSelectorComposerBridge(state) : null;
+    const canDelegateToSelector = Boolean(
+      selectorBridge &&
+        selectorBridge.canHandleComposerSend?.({ hasAttachments: Boolean(hasAttachments) }) &&
+        selectorBridge.sendComposerDraft,
+    );
+    if (canDelegateToSelector && selectorBridge?.sendComposerDraft) {
+      const delegatedRunId = await selectorBridge.sendComposerDraft({
+        draftText: msg,
+        clientRunId: runId,
+      });
+      return delegatedRunId || runId;
+    }
+
     await state.client.request("chat.send", {
       sessionKey: state.sessionKey,
       message: msg,
@@ -273,7 +338,7 @@ export function handleChatEvent(state: ChatState, payload?: ChatEventPayload) {
     if (payload.state === "final") {
       const finalMessage = normalizeFinalAssistantMessage(payload.message);
       if (finalMessage && !isAssistantSilentReply(finalMessage)) {
-        state.chatMessages = [...state.chatMessages, finalMessage];
+        state.chatMessages = [...state.chatMessages, sanitizeAssistantMessageForDisplay(finalMessage)];
         return null;
       }
       return "final";
@@ -292,16 +357,19 @@ export function handleChatEvent(state: ChatState, payload?: ChatEventPayload) {
   } else if (payload.state === "final") {
     const finalMessage = normalizeFinalAssistantMessage(payload.message);
     if (finalMessage && !isAssistantSilentReply(finalMessage)) {
-      state.chatMessages = [...state.chatMessages, finalMessage];
+      state.chatMessages = [...state.chatMessages, sanitizeAssistantMessageForDisplay(finalMessage)];
     } else if (state.chatStream?.trim() && !isSilentReplyStream(state.chatStream)) {
+      const sanitizedStream = sanitizeAssistantStreamForDisplay(state.chatStream).trim();
+      if (sanitizedStream) {
       state.chatMessages = [
         ...state.chatMessages,
         {
           role: "assistant",
-          content: [{ type: "text", text: state.chatStream }],
+          content: [{ type: "text", text: sanitizedStream }],
           timestamp: Date.now(),
         },
       ];
+      }
     }
     state.chatStream = null;
     state.chatRunId = null;
@@ -312,12 +380,13 @@ export function handleChatEvent(state: ChatState, payload?: ChatEventPayload) {
       state.chatMessages = [...state.chatMessages, normalizedMessage];
     } else {
       const streamedText = state.chatStream ?? "";
-      if (streamedText.trim() && !isSilentReplyStream(streamedText)) {
+      const sanitizedStream = sanitizeAssistantStreamForDisplay(streamedText).trim();
+      if (sanitizedStream && !isSilentReplyStream(sanitizedStream)) {
         state.chatMessages = [
           ...state.chatMessages,
           {
             role: "assistant",
-            content: [{ type: "text", text: streamedText }],
+            content: [{ type: "text", text: sanitizedStream }],
             timestamp: Date.now(),
           },
         ];

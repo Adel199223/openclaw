@@ -76,8 +76,141 @@ describe("control-ui-selector", () => {
       (button) => button.textContent?.includes("Local Qwen"),
     ) as HTMLButtonElement | undefined;
     expect(localButton).not.toBeUndefined();
-    expect(localButton?.disabled).toBe(true);
+    expect(localButton?.disabled).toBe(false);
     expect(element.textContent).not.toContain("TypeError: Failed to fetch");
+  });
+
+  it("shows MiniMax fallback and keeps Local Qwen actions available when local is down", async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ok: true,
+          localProviderReady: false,
+          warnings: ["Local TabbyAPI EXL3 is unreachable at http://127.0.0.1:11439/v1/models."],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          selectedMode: "auto",
+          manualRouteId: "local_qwen35_9b_exl3",
+          lastManualRouteId: "local_qwen35_9b_exl3",
+          effectiveModelRef: "minimax/MiniMax-M2.5",
+          warnings: [
+            "Local Qwen is unavailable; using MiniMax-M2.5 until the local provider recovers.",
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ ok: true, localProviderReady: false }))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          selectedMode: "auto",
+          manualRouteId: "local_qwen35_9b_exl3",
+          lastManualRouteId: "local_qwen35_9b_exl3",
+          effectiveModelRef: "minimax/MiniMax-M2.5",
+          warnings: [
+            "Local Qwen is unavailable; using MiniMax-M2.5 until the local provider recovers.",
+          ],
+        }),
+      );
+
+    const element = document.createElement("openclaw-control-ui-selector") as HTMLElement & {
+      sessionKey: string;
+    };
+    element.sessionKey = "agent:main:main";
+    document.body.append(element);
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() =>
+      expect(element.querySelector(".openclaw-selector-chip__meta")?.textContent).toContain(
+        "MiniMax fallback",
+      ),
+    );
+
+    const chip = element.querySelector(".openclaw-selector-chip");
+    chip?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
+    await vi.waitFor(() =>
+      expect(element.querySelector(".openclaw-selector-note")?.textContent).toContain(
+        "MiniMax-M2.5",
+      ),
+    );
+
+    const localButton = Array.from(element.querySelectorAll(".openclaw-selector-btn")).find(
+      (button) => button.textContent?.includes("Local Qwen"),
+    ) as HTMLButtonElement | undefined;
+    expect(localButton).not.toBeUndefined();
+    expect(localButton?.disabled).toBe(false);
+
+    const retryManualButton = Array.from(element.querySelectorAll(".openclaw-selector-btn")).find(
+      (button) => button.textContent?.includes("Retry Manual"),
+    ) as HTMLButtonElement | undefined;
+    expect(retryManualButton).not.toBeUndefined();
+    expect(retryManualButton?.disabled).toBe(false);
+  });
+
+  it("shows MiniMax fallback for Local Qwen context overflow even when the provider is healthy", async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ok: true,
+          localProviderReady: true,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          selectedMode: "auto",
+          manualRouteId: "local_qwen35_9b_exl3",
+          lastManualRouteId: "local_qwen35_9b_exl3",
+          effectiveModelRef: "minimax/MiniMax-M2.5",
+          warnings: ["Local Qwen exceeded its context budget for this turn; using MiniMax-M2.5."],
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ ok: true, localProviderReady: true }))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          selectedMode: "auto",
+          manualRouteId: "local_qwen35_9b_exl3",
+          lastManualRouteId: "local_qwen35_9b_exl3",
+          effectiveModelRef: "minimax/MiniMax-M2.5",
+          warnings: ["Local Qwen exceeded its context budget for this turn; using MiniMax-M2.5."],
+        }),
+      );
+
+    const element = document.createElement("openclaw-control-ui-selector") as HTMLElement & {
+      sessionKey: string;
+    };
+    element.sessionKey = "agent:main:main";
+    document.body.append(element);
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() =>
+      expect(element.querySelector(".openclaw-selector-chip__meta")?.textContent).toContain(
+        "MiniMax fallback",
+      ),
+    );
+
+    const chip = element.querySelector(".openclaw-selector-chip");
+    chip?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
+    await vi.waitFor(() =>
+      expect(element.querySelector(".openclaw-selector-note")?.textContent).toContain(
+        "MiniMax-M2.5",
+      ),
+    );
+
+    const localButton = Array.from(element.querySelectorAll(".openclaw-selector-btn")).find(
+      (button) => button.textContent?.includes("Local Qwen"),
+    ) as HTMLButtonElement | undefined;
+    expect(localButton).not.toBeUndefined();
+    expect(localButton?.disabled).toBe(false);
+
+    const retryManualButton = Array.from(element.querySelectorAll(".openclaw-selector-btn")).find(
+      (button) => button.textContent?.includes("Retry Manual"),
+    ) as HTMLButtonElement | undefined;
+    expect(retryManualButton).not.toBeUndefined();
+    expect(retryManualButton?.disabled).toBe(false);
   });
 
   it("routes selector actions through the same-origin gateway proxy", async () => {

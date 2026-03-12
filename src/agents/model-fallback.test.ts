@@ -729,6 +729,58 @@ describe("runWithModelFallback", () => {
     expect(calls).toEqual([{ provider: "anthropic", model: "claude-opus-4-5" }]);
   });
 
+  it("still rethrows context overflow by default", async () => {
+    const cfg = makeFallbacksOnlyCfg();
+    const run = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("Request size exceeds model context window"))
+      .mockResolvedValueOnce("ok");
+
+    await expect(
+      runWithModelFallback({
+        cfg,
+        provider: "tabby-local",
+        model: "qwen3.5:9b-exl3-think",
+        fallbacksOverride: ["minimax/MiniMax-M2.5"],
+        run,
+      }),
+    ).rejects.toThrow("Request size exceeds model context window");
+
+    expect(run.mock.calls).toEqual([["tabby-local", "qwen3.5:9b-exl3-think"]]);
+  });
+
+  it("can fall back on context overflow when explicitly enabled", async () => {
+    const cfg = makeFallbacksOnlyCfg();
+    const run = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("Request size exceeds model context window"))
+      .mockResolvedValueOnce("ok");
+
+    const result = await runWithModelFallback({
+      cfg,
+      provider: "tabby-local",
+      model: "qwen3.5:9b-exl3-think",
+      fallbacksOverride: ["minimax/MiniMax-M2.5"],
+      allowContextOverflowFallback: true,
+      run,
+    });
+
+    expect(result.result).toBe("ok");
+    expect(result.provider).toBe("minimax");
+    expect(result.model).toBe("MiniMax-M2.5");
+    expect(result.attempts).toEqual([
+      {
+        provider: "tabby-local",
+        model: "qwen3.5:9b-exl3-think",
+        error: "context overflow",
+      },
+    ]);
+    expect(run.mock.calls).toEqual([
+      ["tabby-local", "qwen3.5:9b-exl3-think"],
+      ["minimax", "MiniMax-M2.5"],
+    ]);
+  });
+
   it("keeps explicit fallbacks reachable when models allowlist is present", async () => {
     const cfg = makeCfg({
       agents: {

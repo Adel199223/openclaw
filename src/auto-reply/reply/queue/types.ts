@@ -81,6 +81,9 @@ export type FollowupRun = {
     inputProvenance?: InputProvenance;
     extraSystemPrompt?: string;
     enforceFinalTag?: boolean;
+    bootstrapContextMode?: "full" | "lightweight";
+    /** Optional explicit fallbacks list for this run; when present it wins over config fallbacks. */
+    fallbacksOverride?: string[];
   };
 };
 

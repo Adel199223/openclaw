@@ -90,6 +90,24 @@ function persistSessionToken(gatewayUrl: string, token: string) {
   }
 }
 
+function loadBootstrapTokenFromUrl(gatewayUrl: string): string {
+  if (typeof window === "undefined" || !window.location?.href) {
+    return "";
+  }
+  try {
+    const url = new URL(window.location.href);
+    const params = new URLSearchParams(url.search);
+    const hashParams = new URLSearchParams(url.hash.startsWith("#") ? url.hash.slice(1) : url.hash);
+    const nextGatewayUrl = (params.get("gatewayUrl") ?? hashParams.get("gatewayUrl") ?? "").trim();
+    if (nextGatewayUrl && nextGatewayUrl !== gatewayUrl) {
+      return "";
+    }
+    return (hashParams.get("token") ?? "").trim();
+  } catch {
+    return "";
+  }
+}
+
 export function loadSettings(): UiSettings {
   const defaultUrl = (() => {
     const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -102,10 +120,14 @@ export function loadSettings(): UiSettings {
       : inferBasePathFromPathname(location.pathname);
     return `${proto}://${location.host}${basePath}`;
   })();
+  const bootstrapToken = loadBootstrapTokenFromUrl(defaultUrl);
+  if (bootstrapToken) {
+    persistSessionToken(defaultUrl, bootstrapToken);
+  }
 
   const defaults: UiSettings = {
     gatewayUrl: defaultUrl,
-    token: loadSessionToken(defaultUrl),
+    token: bootstrapToken || loadSessionToken(defaultUrl),
     sessionKey: "main",
     lastActiveSessionKey: "main",
     theme: "claw",

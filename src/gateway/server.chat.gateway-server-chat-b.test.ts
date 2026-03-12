@@ -177,6 +177,39 @@ describe("gateway server chat", () => {
     });
   });
 
+  test("chat.send forwards Local Qwen runtime controls into reply options", async () => {
+    await withGatewayChatHarness(async ({ ws, createSessionDir }) => {
+      const spy = getReplyFromConfig;
+      await connectOk(ws);
+
+      await createSessionDir();
+      await writeMainSessionStore();
+
+      spy.mockClear();
+      let capturedOpts: GetReplyOptions | undefined;
+      spy.mockImplementationOnce(async (_ctx: unknown, opts?: GetReplyOptions) => {
+        capturedOpts = opts;
+        return undefined;
+      });
+
+      const sendRes = await rpcReq(ws, "chat.send", {
+        sessionKey: "main",
+        message: "hello",
+        lightContext: true,
+        fallbackModelRef: "minimax/MiniMax-M2.5",
+        idempotencyKey: "idem-local-compact",
+      });
+      expect(sendRes.ok).toBe(true);
+
+      await vi.waitFor(() => {
+        expect(spy.mock.calls.length).toBeGreaterThan(0);
+      }, FAST_WAIT_OPTS);
+
+      expect(capturedOpts?.bootstrapContextMode).toBe("lightweight");
+      expect(capturedOpts?.fallbackModelRef).toBe("minimax/MiniMax-M2.5");
+    });
+  });
+
   test("chat.history hard-caps single oversized nested payloads", async () => {
     await withGatewayChatHarness(async ({ ws, createSessionDir }) => {
       const historyMaxBytes = 64 * 1024;
@@ -360,6 +393,36 @@ describe("gateway server chat", () => {
       expect(second.content?.replace(/\s+/g, " ").trim()).toBe("A B");
       expect(third.text?.replace(/\s+/g, " ").trim()).toBe("C");
       expect(fourth.content?.[0]?.text).toBe("  keep padded  ");
+    });
+  });
+
+  test("chat.history strips leaked assistant reasoning scaffolding from displayed text", async () => {
+    await withGatewayChatHarness(async ({ ws, createSessionDir }) => {
+      await connectOk(ws);
+
+      const sessionDir = await createSessionDir();
+      await writeMainSessionStore();
+
+      const lines = [
+        JSON.stringify({
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "text",
+                text: ["The user wants an exact OK reply.", "</think>", "", "OK"].join("\n"),
+              },
+            ],
+            timestamp: Date.now(),
+          },
+        }),
+      ];
+      await writeMainSessionTranscript(sessionDir, lines);
+      const messages = await fetchHistoryMessages(ws);
+      expect(messages.length).toBe(1);
+
+      const first = messages[0] as { content?: Array<{ text?: string }> };
+      expect(first.content?.[0]?.text).toBe("OK");
     });
   });
 
